@@ -29,7 +29,7 @@ make clean
 --disable-ffprobe \
 --disable-ffserver \
 --disable-debug \
---enable-shared \
+--disable-shared \
 --disable-demuxers \
 --enable-decoder=pcm_mulaw \
 --enable-decoder=h264 \
