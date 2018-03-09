@@ -1,0 +1,6 @@
+*.a
+*.o
+build/
+ffmpeg/
+toolchain-android/
+ffmpeg3/

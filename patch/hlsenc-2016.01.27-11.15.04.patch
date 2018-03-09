@@ -1,0 +1,90 @@
+diff --git a/libavformat/avformat.h b/libavformat/avformat.h
+index 36f9d02..c1c7a7e 100644
+--- a/libavformat/avformat.h
++++ b/libavformat/avformat.h
+@@ -1246,6 +1246,8 @@ typedef int (*av_format_control_message)(struct AVFormatContext *s, int type,
+ typedef int (*AVOpenCallback)(struct AVFormatContext *s, AVIOContext **pb, const char *url, int flags,
+                               const AVIOInterruptCB *int_cb, AVDictionary **options);
+ 
++typedef void (*AVCreateCallback)(const char *url);
++
+ /**
+  * The duration of a video can be estimated through various ways, and this enum can be used
+  * to know how the duration was estimated.
+@@ -1345,6 +1347,11 @@ typedef struct AVFormatContext {
+     char filename[1024];
+ 
+     /**
++     * set by application, camera_id for create_cb
++     */
++    char camera_id[128];
++
++    /**
+      * Position of the first frame of the component, in
+      * AV_TIME_BASE fractional seconds. NEVER set this value directly:
+      * It is deduced from the AVStream values.
+@@ -1792,6 +1799,12 @@ typedef struct AVFormatContext {
+      * Demuxing: Set by user.
+      */
+     int (*open_cb)(struct AVFormatContext *s, AVIOContext **p, const char *url, int flags, const AVIOInterruptCB *int_cb, AVDictionary **options);
++
++    /**
++     *
++     *
++     */
++    void (*create_cb)(const char *camera_id, const char *url, double duration, long start_time);
+ } AVFormatContext;
+ 
+ int av_format_get_probe_score(const AVFormatContext *s);
+diff --git a/libavformat/hlsenc.c b/libavformat/hlsenc.c
+index d7884e5..2c3daa1 100644
+--- a/libavformat/hlsenc.c
++++ b/libavformat/hlsenc.c
+@@ -114,6 +114,7 @@ typedef struct HLSContext {
+     AVDictionary *vtt_format_options;
+ 
+     char *method;
++    long start_time;
+ 
+ } HLSContext;
+ 
+@@ -271,6 +272,9 @@ static int hls_mux_init(AVFormatContext *s)
+     oc->oformat            = hls->oformat;
+     oc->interrupt_callback = s->interrupt_callback;
+     oc->max_delay          = s->max_delay;
++    oc->create_cb          = s->create_cb;
++    memset(oc->camera_id, 0, sizeof(oc->camera_id));
++    av_strlcpy(oc->camera_id, s->camera_id, sizeof(oc->camera_id));
+     av_dict_copy(&oc->metadata, s->metadata, 0);
+ 
+     if(hls->vtt_oformat) {
+@@ -335,6 +339,11 @@ static int hls_append_segment(HLSContext *hls, double duration, int64_t pos,
+ 
+     hls->last_segment = en;
+ 
++    //dirname = av_strdup(hls->segment_filename);
++    if (hls->avf->create_cb)
++        hls->avf->create_cb(hls->avf->camera_id,hls->avf->filename, hls->duration,
++                hls->start_time);
++
+     if (hls->max_nb_segments && hls->nb_entries >= hls->max_nb_segments) {
+         en = hls->segments;
+         hls->segments = en->next;
+@@ -503,7 +512,8 @@ static int hls_start(AVFormatContext *s)
+             time_t now0;
+             struct tm *tm, tmpbuf;
+             time(&now0);
+-            tm = localtime_r(&now0, &tmpbuf);
++            tm = localtime(&now0); // use UTC time
++            c->start_time = now0;
+             if (!strftime(oc->filename, sizeof(oc->filename), c->basename, tm)) {
+                 av_log(oc, AV_LOG_ERROR, "Could not get segment filename with use_localtime\n");
+                 return AVERROR(EINVAL);
+@@ -764,6 +774,7 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
+                     pkt->flags & AV_PKT_FLAG_KEY;
+         is_ref_pkt = st->codec->codec_type == AVMEDIA_TYPE_VIDEO;
+     }
++
+     if (pkt->pts == AV_NOPTS_VALUE)
+         is_ref_pkt = can_split = 0;
+ 

@@ -1,0 +1,260 @@
+diff --git a/libavformat/avformat.h b/libavformat/avformat.h
+index 34bad43..b0a9061 100644
+--- a/libavformat/avformat.h
++++ b/libavformat/avformat.h
+@@ -1281,6 +1281,7 @@ typedef int (*av_format_control_message)(struct AVFormatContext *s, int type,
+ typedef int (*AVOpenCallback)(struct AVFormatContext *s, AVIOContext **pb, const char *url, int flags,
+                               const AVIOInterruptCB *int_cb, AVDictionary **options);
+ 
++typedef void (*AVCreateCallback)(const char *url);
+ /**
+  * The duration of a video can be estimated through various ways, and this enum can be used
+  * to know how the duration was estimated.
+@@ -1380,6 +1381,12 @@ typedef struct AVFormatContext {
+     char filename[1024];
+ 
+     /**
++     * set by application, camera_id for create_cb
++     *
++     * */
++    char camera_id[128];
++
++    /**
+      * Position of the first frame of the component, in
+      * AV_TIME_BASE fractional seconds. NEVER set this value directly:
+      * It is deduced from the AVStream values.
+@@ -1866,6 +1873,8 @@ typedef struct AVFormatContext {
+      * A callback for closing the streams opened with AVFormatContext.io_open().
+      */
+     void (*io_close)(struct AVFormatContext *s, AVIOContext *pb);
++
++    void (*create_cb)(const char *camera_id, const char* url, const char* output_name, double duration, long start_time );
+ } AVFormatContext;
+ 
+ int av_format_get_probe_score(const AVFormatContext *s);
+diff --git a/libavformat/hlsenc.c b/libavformat/hlsenc.c
+index 85a0907..247278d 100644
+--- a/libavformat/hlsenc.c
++++ b/libavformat/hlsenc.c
+@@ -93,6 +93,7 @@ typedef struct HLSContext {
+     int64_t size;         // last segment size
+     int nb_entries;
+     int discontinuity_set;
++    int disable_m3u8;
+ 
+     HLSSegment *segments;
+     HLSSegment *last_segment;
+@@ -115,6 +116,7 @@ typedef struct HLSContext {
+     AVDictionary *vtt_format_options;
+ 
+     char *method;
++    long start_time;
+ 
+ } HLSContext;
+ 
+@@ -273,6 +275,9 @@ static int hls_mux_init(AVFormatContext *s)
+     oc->opaque             = s->opaque;
+     oc->io_open            = s->io_open;
+     oc->io_close           = s->io_close;
++    oc->create_cb          = s->create_cb;
++    memset(oc->camera_id, 0, sizeof(oc->camera_id));
++    av_strlcpy(oc->camera_id, s->camera_id, sizeof(oc->camera_id));
+     av_dict_copy(&oc->metadata, s->metadata, 0);
+ 
+     if(hls->vtt_oformat) {
+@@ -337,6 +342,11 @@ static int hls_append_segment(HLSContext *hls, double duration, int64_t pos,
+ 
+     hls->last_segment = en;
+ 
++    //dirname = av_strdup(hls->segment_filename);
++    if (hls->avf->create_cb)
++        hls->avf->create_cb(hls->avf->camera_id,hls->avf->filename, hls->oformat->name, hls->duration,
++                hls->start_time);
++
+     if (hls->max_nb_segments && hls->nb_entries >= hls->max_nb_segments) {
+         en = hls->segments;
+         hls->segments = en->next;
+@@ -391,6 +401,8 @@ static int hls_window(AVFormatContext *s, int last)
+     char *iv_string = NULL;
+     AVDictionary *options = NULL;
+ 
++    if (hls->disable_m3u8) return ret;
++
+     if (!use_rename && !warned_non_file++)
+         av_log(s, AV_LOG_ERROR, "Cannot use rename on non file protocol, this may lead to races and temporarly partial files\n");
+ 
+@@ -501,10 +513,24 @@ static int hls_start(AVFormatContext *s)
+     } else {
+         if (c->use_localtime) {
+             time_t now0;
+-            struct tm *tm, tmpbuf;
++            struct tm *tm;
+             time(&now0);
+-            tm = localtime_r(&now0, &tmpbuf);
+-            if (!strftime(oc->filename, sizeof(oc->filename), c->basename, tm)) {
++
++            tm = gmtime(&now0);
++            av_strlcpy(tm->tm_zone, "GMT\0", 4);
++            tm->tm_gmtoff = 0;
++            c->start_time = now0;
++
++            char temppath[1024];
++            char path[1024];
++            av_strlcpy(temppath, c->basename, sizeof(temppath));
++            char *p = strrchr(temppath, '/');
++            if (p)
++                *p = '\0';
++            sprintf(path, temppath, (1900 + tm->tm_year), (tm->tm_mon + 1), tm->tm_mday);
++            opt_mkdir(path);
++
++            if ((sprintf(oc->filename, c->basename, (1900 + tm->tm_year), (tm->tm_mon + 1), tm->tm_mday, now0)) < 0) {
+                 av_log(oc, AV_LOG_ERROR, "Could not get segment filename with use_localtime\n");
+                 return AVERROR(EINVAL);
+             }
+@@ -587,7 +613,7 @@ static int hls_write_header(AVFormatContext *s)
+     int ret, i;
+     char *p;
+     const char *pattern = "%d.ts";
+-    const char *pattern_localtime_fmt = "-%s.ts";
++    const char *pattern_localtime_fmt = "/%4d-%02d-%02d/%ld.ts";
+     const char *vtt_pattern = "%d.vtt";
+     AVDictionary *options = NULL;
+     int basename_size;
+@@ -655,7 +681,7 @@ static int hls_write_header(AVFormatContext *s)
+ 
+         av_strlcpy(hls->basename, s->filename, basename_size);
+ 
+-        p = strrchr(hls->basename, '.');
++        p = strrchr(hls->basename, '/');
+         if (p)
+             *p = '\0';
+         if (hls->use_localtime) {
+@@ -855,7 +881,7 @@ static int hls_write_trailer(struct AVFormatContext *s)
+ #define E AV_OPT_FLAG_ENCODING_PARAM
+ static const AVOption options[] = {
+     {"start_number",  "set first number in the sequence",        OFFSET(start_sequence),AV_OPT_TYPE_INT64,  {.i64 = 0},     0, INT64_MAX, E},
+-    {"hls_time",      "set segment length in seconds",           OFFSET(time),    AV_OPT_TYPE_FLOAT,  {.dbl = 2},     0, FLT_MAX, E},
++    {"hls_time",      "set segment length in seconds",           OFFSET(time),    AV_OPT_TYPE_FLOAT,  {.dbl = 10},     0, FLT_MAX, E},
+     {"hls_list_size", "set maximum number of playlist entries",  OFFSET(max_nb_segments),    AV_OPT_TYPE_INT,    {.i64 = 5},     0, INT_MAX, E},
+     {"hls_ts_options","set hls mpegts list of options for the container format used for hls", OFFSET(format_options_str), AV_OPT_TYPE_STRING, {.str = NULL},  0, 0,    E},
+     {"hls_vtt_options","set hls vtt list of options for the container format used for hls", OFFSET(vtt_format_options_str), AV_OPT_TYPE_STRING, {.str = NULL},  0, 0,    E},
+@@ -871,7 +897,8 @@ static const AVOption options[] = {
+     {"round_durations", "round durations in m3u8 to whole numbers", 0, AV_OPT_TYPE_CONST, {.i64 = HLS_ROUND_DURATIONS }, 0, UINT_MAX,   E, "flags"},
+     {"discont_start", "start the playlist with a discontinuity tag", 0, AV_OPT_TYPE_CONST, {.i64 = HLS_DISCONT_START }, 0, UINT_MAX,   E, "flags"},
+     {"omit_endlist", "Do not append an endlist when ending stream", 0, AV_OPT_TYPE_CONST, {.i64 = HLS_OMIT_ENDLIST }, 0, UINT_MAX,   E, "flags"},
+-    { "use_localtime", "set filename expansion with strftime at segment creation", OFFSET(use_localtime), AV_OPT_TYPE_BOOL, {.i64 = 0 }, 0, 1, E },
++    { "use_localtime", "set filename expansion with strftime at segment creation", OFFSET(use_localtime), AV_OPT_TYPE_BOOL, {.i64 = 1 }, 0, 1, E },
++    { "disable_m3u8",          "disable m3u8 file creating", OFFSET(disable_m3u8), AV_OPT_TYPE_INT, {.i64 = 0 }, 0, 1, E },
+     {"method", "set the HTTP method", OFFSET(method), AV_OPT_TYPE_STRING, {.str = NULL},  0, 0,    E},
+ 
+     { NULL },
+diff --git a/libavformat/img2enc.c b/libavformat/img2enc.c
+index ebbac2b..53eba8e 100644
+--- a/libavformat/img2enc.c
++++ b/libavformat/img2enc.c
+@@ -92,11 +92,39 @@ static int write_packet(AVFormatContext *s, AVPacket *pkt)
+             time_t now0;
+             struct tm *tm, tmpbuf;
+             time(&now0);
+-            tm = localtime_r(&now0, &tmpbuf);
++            //tm = localtime_r(&now0, &tmpbuf);
++
++            tm = gmtime(&now0);
++            char temppath[1024];
++            char path[1024];
++            char subfix[10];
++
++            memset(subfix, 0, sizeof(subfix));
++            char *subp = strrchr(img->path, '.');
++            memcpy(subfix, subp, sizeof(subfix));
++
++            av_strlcpy(temppath, img->path, sizeof(temppath));
++            char *p = strrchr(temppath, '/');
++            if (p)
++                *(p) = '\0';
++            av_strlcat(temppath, "/%4d-%02d-%02d", sizeof(temppath));
++            snprintf(path, temppath, (1900 + tm->tm_year), (tm->tm_mon + 1), tm->tm_mday);
++            opt_mkdir(path);
++
++            av_strlcat(path, "/%ld%s", sizeof(path));
++
++            /*
+             if (!strftime(filename, sizeof(filename), img->path, tm)) {
+                 av_log(s, AV_LOG_ERROR, "Could not get frame filename with strftime\n");
+                 return AVERROR(EINVAL);
+             }
++            */
++
++            if ((sprintf(filename, path, now0, subfix)) < 0) {
++                av_log(s, AV_LOG_ERROR, "Could not get frame filename with strftime\n");
++                return AVERROR(EINVAL);
++            }
++
+         } else if (av_get_frame_filename(filename, sizeof(filename), img->path, img->img_number) < 0 &&
+                    img->img_number > 1) {
+             av_log(s, AV_LOG_ERROR,
+@@ -181,6 +209,9 @@ static int write_packet(AVFormatContext *s, AVPacket *pkt)
+                 return ret;
+         }
+     }
++    if (s->create_cb) {
++        s->create_cb(s->camera_id, filename, s->oformat->name, 0, 0);
++    }
+ 
+     img->img_number++;
+     return 0;
+diff --git a/libavutil/opt.c b/libavutil/opt.c
+index eae4f75..4a5466a 100644
+--- a/libavutil/opt.c
++++ b/libavutil/opt.c
+@@ -42,6 +42,27 @@
+ 
+ #include <float.h>
+ 
++void opt_mkdir(const char *path) {
++    char opath[256];
++    char *p;
++    size_t len;
++
++    umask(0);
++    strncpy(opath, path, sizeof(opath));
++    len = strlen(opath);
++    if(opath[len - 1] == '/')
++        opath[len - 1] = '\0';
++    for(p = opath; *p; p++)
++        if(*p == '/') {
++            *p = '\0';
++            if(access(opath, F_OK))
++                mkdir(opath, 0766);
++            *p = '/';
++        }
++    if(access(opath, F_OK))
++        mkdir(opath, 0766);
++}
++
+ const AVOption *av_opt_next(const void *obj, const AVOption *last)
+ {
+     const AVClass *class;
+diff --git a/libavutil/opt.h b/libavutil/opt.h
+index 753434d..c765572 100644
+--- a/libavutil/opt.h
++++ b/libavutil/opt.h
+@@ -35,6 +35,9 @@
+ #include "samplefmt.h"
+ #include "version.h"
+ 
++#include <sys/stat.h>
++#include <unistd.h>
++
+ /**
+  * @defgroup avoptions AVOptions
+  * @ingroup lavu_data
+@@ -368,6 +371,8 @@ typedef struct AVOptionRanges {
+     int nb_components;
+ } AVOptionRanges;
+ 
++void opt_mkdir(const char* path);
++
+ /**
+  * Show the obj options.
+  *

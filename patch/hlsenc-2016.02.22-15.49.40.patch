@@ -1,0 +1,162 @@
+diff --git a/libavformat/avformat.h b/libavformat/avformat.h
+index 36f9d02..c1c7a7e 100644
+--- a/libavformat/avformat.h
++++ b/libavformat/avformat.h
+@@ -1246,6 +1246,8 @@ typedef int (*av_format_control_message)(struct AVFormatContext *s, int type,
+ typedef int (*AVOpenCallback)(struct AVFormatContext *s, AVIOContext **pb, const char *url, int flags,
+                               const AVIOInterruptCB *int_cb, AVDictionary **options);
+ 
++typedef void (*AVCreateCallback)(const char *url);
++
+ /**
+  * The duration of a video can be estimated through various ways, and this enum can be used
+  * to know how the duration was estimated.
+@@ -1345,6 +1347,11 @@ typedef struct AVFormatContext {
+     char filename[1024];
+ 
+     /**
++     * set by application, camera_id for create_cb
++     */
++    char camera_id[128];
++
++    /**
+      * Position of the first frame of the component, in
+      * AV_TIME_BASE fractional seconds. NEVER set this value directly:
+      * It is deduced from the AVStream values.
+@@ -1792,6 +1799,12 @@ typedef struct AVFormatContext {
+      * Demuxing: Set by user.
+      */
+     int (*open_cb)(struct AVFormatContext *s, AVIOContext **p, const char *url, int flags, const AVIOInterruptCB *int_cb, AVDictionary **options);
++
++    /**
++     *
++     *
++     */
++    void (*create_cb)(const char *camera_id, const char *url, double duration, long start_time);
+ } AVFormatContext;
+ 
+ int av_format_get_probe_score(const AVFormatContext *s);
+diff --git a/libavformat/hlsenc.c b/libavformat/hlsenc.c
+index d7884e5..3f331c6 100644
+--- a/libavformat/hlsenc.c
++++ b/libavformat/hlsenc.c
+@@ -114,6 +114,7 @@ typedef struct HLSContext {
+     AVDictionary *vtt_format_options;
+ 
+     char *method;
++    long start_time;
+ 
+ } HLSContext;
+ 
+@@ -271,6 +272,9 @@ static int hls_mux_init(AVFormatContext *s)
+     oc->oformat            = hls->oformat;
+     oc->interrupt_callback = s->interrupt_callback;
+     oc->max_delay          = s->max_delay;
++    oc->create_cb          = s->create_cb;
++    memset(oc->camera_id, 0, sizeof(oc->camera_id));
++    av_strlcpy(oc->camera_id, s->camera_id, sizeof(oc->camera_id));
+     av_dict_copy(&oc->metadata, s->metadata, 0);
+ 
+     if(hls->vtt_oformat) {
+@@ -335,6 +339,11 @@ static int hls_append_segment(HLSContext *hls, double duration, int64_t pos,
+ 
+     hls->last_segment = en;
+ 
++    //dirname = av_strdup(hls->segment_filename);
++    if (hls->avf->create_cb)
++        hls->avf->create_cb(hls->avf->camera_id,hls->avf->filename, hls->duration,
++                hls->start_time);
++
+     if (hls->max_nb_segments && hls->nb_entries >= hls->max_nb_segments) {
+         en = hls->segments;
+         hls->segments = en->next;
+@@ -483,6 +492,27 @@ fail:
+     return ret;
+ }
+ 
++static void _mkdir(const char *path)
++{
++    char opath[256];
++    char *p;
++    size_t len;
++
++    strncpy(opath, path, sizeof(opath));
++    len = strlen(opath);
++    if(opath[len - 1] == '/')
++        opath[len - 1] = '\0';
++    for(p = opath; *p; p++)
++        if(*p == '/') {
++            *p = '\0';
++            if(access(opath, F_OK))
++                mkdir(opath, S_IRWXU);
++            *p = '/';
++        }
++    if(access(opath, F_OK))         /* if path is not terminated with / */
++        mkdir(opath, S_IRWXU);
++}
++
+ static int hls_start(AVFormatContext *s)
+ {
+     HLSContext *c = s->priv_data;
+@@ -501,10 +531,24 @@ static int hls_start(AVFormatContext *s)
+     } else {
+         if (c->use_localtime) {
+             time_t now0;
+-            struct tm *tm, tmpbuf;
++            struct tm *tm;
+             time(&now0);
+-            tm = localtime_r(&now0, &tmpbuf);
+-            if (!strftime(oc->filename, sizeof(oc->filename), c->basename, tm)) {
++
++            tm = gmtime(&now0);
++            av_strlcpy(tm->tm_zone, "GMT\0", 4);
++            tm->tm_gmtoff = 0;
++            c->start_time = now0;
++
++            char temppath[1024];
++            char path[1024];
++            av_strlcpy(temppath, c->basename, sizeof(temppath));
++            char *p = strrchr(temppath, '/');
++            if (p)
++                *p = '\0';
++            sprintf(path, temppath, (1900 + tm->tm_year), (tm->tm_mon + 1), tm->tm_mday);
++            _mkdir(path);
++
++            if ((sprintf(oc->filename, c->basename, (1900 + tm->tm_year), (tm->tm_mon + 1), tm->tm_mday, now0)) < 0) {
+                 av_log(oc, AV_LOG_ERROR, "Could not get segment filename with use_localtime\n");
+                 return AVERROR(EINVAL);
+             }
+@@ -587,7 +631,7 @@ static int hls_write_header(AVFormatContext *s)
+     int ret, i;
+     char *p;
+     const char *pattern = "%d.ts";
+-    const char *pattern_localtime_fmt = "-%s.ts";
++    const char *pattern_localtime_fmt = "/%4d-%02d-%02d/%ld.ts";
+     const char *vtt_pattern = "%d.vtt";
+     AVDictionary *options = NULL;
+     int basename_size;
+@@ -634,6 +678,7 @@ static int hls_write_header(AVFormatContext *s)
+ 
+     if (hls->segment_filename) {
+         hls->basename = av_strdup(hls->segment_filename);
++
+         if (!hls->basename) {
+             ret = AVERROR(ENOMEM);
+             goto fail;
+@@ -655,7 +700,7 @@ static int hls_write_header(AVFormatContext *s)
+ 
+         av_strlcpy(hls->basename, s->filename, basename_size);
+ 
+-        p = strrchr(hls->basename, '.');
++        p = strrchr(hls->basename, '/');
+         if (p)
+             *p = '\0';
+         if (hls->use_localtime) {
+@@ -764,6 +809,7 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
+                     pkt->flags & AV_PKT_FLAG_KEY;
+         is_ref_pkt = st->codec->codec_type == AVMEDIA_TYPE_VIDEO;
+     }
++
+     if (pkt->pts == AV_NOPTS_VALUE)
+         is_ref_pkt = can_split = 0;
+ 

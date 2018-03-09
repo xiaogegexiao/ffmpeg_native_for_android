@@ -1,0 +1,145 @@
+diff --git a/libavformat/avformat.h b/libavformat/avformat.h
+index 36f9d02..7fccc4b 100644
+--- a/libavformat/avformat.h
++++ b/libavformat/avformat.h
+@@ -1246,6 +1246,8 @@ typedef int (*av_format_control_message)(struct AVFormatContext *s, int type,
+ typedef int (*AVOpenCallback)(struct AVFormatContext *s, AVIOContext **pb, const char *url, int flags,
+                               const AVIOInterruptCB *int_cb, AVDictionary **options);
+ 
++typedef void (*AVCreateCallback)(const char *url);
++
+ /**
+  * The duration of a video can be estimated through various ways, and this enum can be used
+  * to know how the duration was estimated.
+@@ -1345,6 +1347,11 @@ typedef struct AVFormatContext {
+     char filename[1024];
+ 
+     /**
++     * set by application, camera_id for create_cb
++     */
++    char camera_id[128];
++
++    /**
+      * Position of the first frame of the component, in
+      * AV_TIME_BASE fractional seconds. NEVER set this value directly:
+      * It is deduced from the AVStream values.
+@@ -1792,6 +1799,12 @@ typedef struct AVFormatContext {
+      * Demuxing: Set by user.
+      */
+     int (*open_cb)(struct AVFormatContext *s, AVIOContext **p, const char *url, int flags, const AVIOInterruptCB *int_cb, AVDictionary **options);
++
++    /**
++     *
++     *
++     */
++    void (*create_cb)(const char *camera_id, const char *url, const char* output_name, double duration, long start_time);
+ } AVFormatContext;
+ 
+ int av_format_get_probe_score(const AVFormatContext *s);
+diff --git a/libavformat/img2enc.c b/libavformat/img2enc.c
+index cd4a9a8..8007cc7 100644
+--- a/libavformat/img2enc.c
++++ b/libavformat/img2enc.c
+@@ -95,11 +95,36 @@ static int write_packet(AVFormatContext *s, AVPacket *pkt)
+             time_t now0;
+             struct tm *tm, tmpbuf;
+             time(&now0);
+-            tm = localtime_r(&now0, &tmpbuf);
++            tm = gmtime(&now0);
++
++            //const char *pattern_localtime_fmt = "/%4d-%02d-%02d/%ld.ts";
++            char temppath[1024];
++            char path[1024];
++            char subfix[10];
++
++            memset(subfix, 0, sizeof(subfix));
++            char *subp = strrchr(img->path, '.');
++            memcpy(subfix, subp, sizeof(subfix));
++
++            av_strlcpy(temppath, img->path, sizeof(temppath));
++            char *p = strrchr(temppath, '/');
++            if (p)
++                *(p) = '\0';
++            av_strlcat(temppath, "/%4d-%02d-%02d",sizeof(temppath));
++            sprintf(path, temppath, (1900 + tm->tm_year), (tm->tm_mon + 1), tm->tm_mday);
++            opt_mkdir(path);
++
++            av_strlcat(path, "/%ld%s", sizeof(path));
++            /*
+             if (!strftime(filename, sizeof(filename), img->path, tm)) {
+                 av_log(s, AV_LOG_ERROR, "Could not get frame filename with strftime\n");
+                 return AVERROR(EINVAL);
+             }
++            */
++            if ((sprintf(filename, path, now0, subfix)) < 0) {
++                av_log(s, AV_LOG_ERROR, "Could not get frame filename with strftime\n");
++                return AVERROR(EINVAL);
++            }
+         } else if (av_get_frame_filename(filename, sizeof(filename), img->path, img->img_number) < 0 &&
+                    img->img_number > 1) {
+             av_log(s, AV_LOG_ERROR,
+@@ -184,6 +209,9 @@ static int write_packet(AVFormatContext *s, AVPacket *pkt)
+         }
+     }
+ 
++    if (s->create_cb) {
++        s->create_cb(s->camera_id, filename, s->oformat->name, 0, 0);
++    }
+     img->img_number++;
+     return 0;
+ }
+diff --git a/libavutil/opt.c b/libavutil/opt.c
+index 4fd25ff..b31013a 100644
+--- a/libavutil/opt.c
++++ b/libavutil/opt.c
+@@ -42,6 +42,28 @@
+ 
+ #include <float.h>
+ 
++void opt_mkdir(const char *path)
++{
++    char opath[256];
++    char *p;
++    size_t len;
++
++    umask(0);
++    strncpy(opath, path, sizeof(opath));
++    len = strlen(opath);
++    if(opath[len - 1] == '/')
++        opath[len - 1] = '\0';
++    for(p = opath; *p; p++)
++        if(*p == '/') {
++            *p = '\0';
++            if(access(opath, F_OK))
++                mkdir(opath, 0766);
++            *p = '/';
++        }
++    if(access(opath, F_OK))         /* if path is not terminated with / */
++        mkdir(opath, 0766);
++}
++
+ const AVOption *av_opt_next(const void *obj, const AVOption *last)
+ {
+     const AVClass *class;
+diff --git a/libavutil/opt.h b/libavutil/opt.h
+index 753434d..0c7e037 100644
+--- a/libavutil/opt.h
++++ b/libavutil/opt.h
+@@ -34,6 +34,9 @@
+ #include "pixfmt.h"
+ #include "samplefmt.h"
+ #include "version.h"
++#include <sys/stat.h>
++
++#include <unistd.h>
+ 
+ /**
+  * @defgroup avoptions AVOptions
+@@ -368,6 +371,7 @@ typedef struct AVOptionRanges {
+     int nb_components;
+ } AVOptionRanges;
+ 
++void opt_mkdir(const char *path);
+ /**
+  * Show the obj options.
+  *
