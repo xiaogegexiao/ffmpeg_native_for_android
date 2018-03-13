@@ -14,6 +14,7 @@ NDK_TOOLCHAIN_ABI_VERSION=4.9
 NUMBER_OF_CORES=$(sysctl -n hw.ncpu)
 HOST_UNAME=$(uname -m)
 TARGET_OS=linux
+OPENSSL_DIR=$(pwd)/openssl-1.0.2
 
 CFLAGS='-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fno-strict-overflow -fstack-protector-all'
 LDFLAGS='-Wl,-z,relro -Wl,-z,now -pie'

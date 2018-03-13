@@ -13,7 +13,12 @@ pushd ffmpeg
 
 CPU='cortex-a8'
 
+echo "ls ${OPENSSL_DIR}/armeabi-v7a/lib"
+
 make clean
+
+echo $OPENSSL_DIR
+echo $TOOLCHAIN_PREFIX
 
 ./configure \
 --target-os="$TARGET_OS" \
@@ -82,10 +87,12 @@ make clean
 --enable-thumb \
 --enable-nonfree \
 --enable-static \
+--enable-openssl \
+--enable-protocol=tls_openssl \
 --pkg-config="${2}/ffmpeg-pkg-config" \
 --prefix="${2}/build/${1}" \
---extra-cflags="-I${TOOLCHAIN_PREFIX}/include $CFLAGS" \
---extra-ldflags="-L${TOOLCHAIN_PREFIX}/lib $LDFLAGS" \
+--extra-cflags="-I${TOOLCHAIN_PREFIX}/include -I${OPENSSL_DIR}/include $CFLAGS" \
+--extra-ldflags="$LDFLAGS -L${TOOLCHAIN_PREFIX}/lib -L${OPENSSL_DIR}/armeabi-v7a/lib -lssl -lcrypto" \
 --extra-cxxflags="$CXX_FLAGS" || exit 1
 
 make -j${NUMBER_OF_CORES} && make install || exit 1
