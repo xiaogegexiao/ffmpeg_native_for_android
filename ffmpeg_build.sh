@@ -92,7 +92,7 @@ echo $TOOLCHAIN_PREFIX
 --pkg-config="${2}/ffmpeg-pkg-config" \
 --prefix="${2}/build/${1}" \
 --extra-cflags="-I${TOOLCHAIN_PREFIX}/include -I${OPENSSL_DIR}/include $CFLAGS" \
---extra-ldflags="$LDFLAGS -L${TOOLCHAIN_PREFIX}/lib -L${OPENSSL_DIR}/armeabi-v7a/lib -lssl -lcrypto" \
+--extra-ldflags="$LDFLAGS -L${TOOLCHAIN_PREFIX}/lib -L${OPENSSL_DIR}/lib -lssl -lcrypto" \
 --extra-cxxflags="$CXX_FLAGS" || exit 1
 
 make -j${NUMBER_OF_CORES} && make install || exit 1
